@@ -648,6 +648,18 @@ body::before {
   line-height: 1.58;
 }
 
+.section-hero {
+  margin-top: 0.2rem;
+  padding: 1rem;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.96), rgba(244, 235, 220, 0.96)),
+    radial-gradient(circle at top right, rgba(45, 143, 137, 0.12), transparent 36%);
+}
+
+.section-hero figcaption {
+  font-weight: 700;
+}
+
 .reader-copy .mjx-chtml,
 .equation-tex .mjx-chtml,
 .math-display .mjx-chtml,

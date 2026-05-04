@@ -416,10 +416,12 @@
     const prevSection = chapter.sections[sectionIndex - 1] || null;
     const nextSection = chapter.sections[sectionIndex + 1] || null;
     const studied = Boolean(progress.studiedSections[currentSection.id]);
+    const chapterOrientationHtml = chapter.introHtml.replace(/<figure class="md-figure[\s\S]*?<\/figure>/g, "");
     const sectionHero = currentSection.figureSrc
       ? `
         <figure class="md-figure section-hero">
           <img src="${escapeHtml(currentSection.figureSrc)}" alt="${escapeHtml(currentSection.figureAlt || currentSection.title)}" loading="lazy" />
+          <figcaption>Section visual for ${escapeHtml(currentSection.title)}</figcaption>
         </figure>
       `
       : "";
@@ -464,11 +466,11 @@
           </div>
 
           <div class="reader-copy">
-            <div class="mini-panel" style="margin-bottom:1rem;">
-              <h4>Chapter orientation</h4>
-              ${chapter.introHtml}
-            </div>
             ${sectionHero}
+            <div class="mini-panel" style="margin-bottom:1rem;">
+              <h4>Chapter orientation and big-picture context</h4>
+              ${chapterOrientationHtml}
+            </div>
             ${currentSection.html}
           </div>
 
