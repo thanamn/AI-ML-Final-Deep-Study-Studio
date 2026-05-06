@@ -12,14 +12,16 @@ Open `index.html` directly in a browser, or serve the folder locally if you want
 
 - `index.html`: app shell
 - `styles.css`: layout and visual design
-- `app.js`: reader, practice, flashcards, search, and concept-lab behavior
+- `app.js`: reader, practice, exams, flashcards, search, and concept-lab behavior
 - `content-data.js`: generated content bundle used by the site
+- `exam-data.js`: three full mixed final exams with detailed multiple-choice questions and explanations
 - `figures/`: generated chapter and section visuals used throughout the reader
 
 ## Reader upgrades
 
 - Proper math rendering with MathJax
 - A long-form reader with section-by-section study flow
+- A much deeper generated study layer across every chapter and subchapter
 - Section-specific graphics for every subchapter
 - Reading-size controls for compact, comfortable, and large layouts
 - Focus mode for distraction-free reading
@@ -33,6 +35,7 @@ Open `index.html` directly in a browser, or serve the folder locally if you want
 
 - `Dashboard`: roadmap and topic atlas
 - `Reader`: long-form section-by-section lessons
+- `Exams`: three full mixed finals covering unsupervised learning through generative AI
 - `Practice`: workbook questions with answer reveal and confidence tracking
 - `Cram`: compact review cards
 - `Flashcards`: glossary, comparison, and workbook recall cards

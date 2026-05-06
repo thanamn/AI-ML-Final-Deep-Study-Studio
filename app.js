@@ -8,6 +8,7 @@
   const VIEW_TITLES = {
     dashboard: "Dashboard",
     reader: "Deep Reader",
+    exams: "Exam Simulator",
     practice: "Practice Arena",
     cram: "Cram Review",
     flashcards: "Flashcards",
@@ -18,6 +19,8 @@
   const DEFAULT_UI_PREFS = {
     readerScale: "comfortable",
     focusMode: false,
+    companionTab: "orientation",
+    companionOpen: false,
   };
   const MOBILE_SIDEBAR_BREAKPOINT = 1180;
 
@@ -46,6 +49,8 @@
   };
 
   const chapterMap = Object.fromEntries(data.chapters.map((chapter) => [chapter.slug, chapter]));
+  const exams = Array.isArray(data.exams) ? data.exams : [];
+  const examMap = Object.fromEntries(exams.map((exam) => [exam.id, exam]));
   const sectionMap = new Map();
   data.chapters.forEach((chapter) => {
     chapter.sections.forEach((section) => sectionMap.set(section.id, { chapter, section }));
@@ -65,6 +70,8 @@
     practiceIndex: 0,
     practiceOrder: [],
     revealAnswer: false,
+    examId: exams[0]?.id || null,
+    examQuestionIndex: 0,
     flashTopic: "all",
     flashIndex: 0,
     flashOrder: [],
@@ -82,8 +89,11 @@
       sidebarOpen: false,
       readerScale: progress.uiPrefs?.readerScale || DEFAULT_UI_PREFS.readerScale,
       focusMode: progress.uiPrefs?.focusMode || DEFAULT_UI_PREFS.focusMode,
+      companionTab: progress.uiPrefs?.companionTab || DEFAULT_UI_PREFS.companionTab,
+      companionOpen: progress.uiPrefs?.companionOpen ?? DEFAULT_UI_PREFS.companionOpen,
       sectionQuery: "",
       copyStatus: "",
+      notesStatus: "",
     },
   };
 
@@ -110,13 +120,26 @@
       state.topic = hashState.topic;
       state.section = hashState.section || chapterMap[hashState.topic].sections[0]?.id || null;
       state.view = hashState.view || "reader";
+      if (hashState.exam && examMap[hashState.exam]) {
+        state.examId = hashState.exam;
+        const examQuestionIndex = examMap[hashState.exam].questions.findIndex((question) => question.id === hashState.question);
+        state.examQuestionIndex = examQuestionIndex >= 0 ? examQuestionIndex : 0;
+      }
     } else {
       const lastLocation = progress.lastLocation;
       if (lastLocation && chapterMap[lastLocation.topic]) {
         state.topic = lastLocation.topic;
         state.section = lastLocation.section || chapterMap[lastLocation.topic].sections[0]?.id || null;
         state.view = lastLocation.view || "dashboard";
+        if (lastLocation.examId && examMap[lastLocation.examId]) {
+          state.examId = lastLocation.examId;
+          state.examQuestionIndex = Math.max(0, Math.min(lastLocation.examQuestionIndex || 0, examMap[lastLocation.examId].questions.length - 1));
+        }
       }
+    }
+    if (!examMap[state.examId] && exams[0]) {
+      state.examId = exams[0].id;
+      state.examQuestionIndex = 0;
     }
     resetPracticeOrder();
     resetFlashcards();
@@ -128,17 +151,36 @@
     try {
       const raw = window.localStorage.getItem(STORAGE_KEY);
       if (!raw) {
-        return { studiedSections: {}, quizConfidence: {}, lastLocation: null, uiPrefs: { ...DEFAULT_UI_PREFS } };
+        return {
+          studiedSections: {},
+          quizConfidence: {},
+          readerNotes: { chapters: {}, sections: {} },
+          examAttempts: {},
+          lastLocation: null,
+          uiPrefs: { ...DEFAULT_UI_PREFS },
+        };
       }
       const parsed = JSON.parse(raw);
       return {
         studiedSections: parsed.studiedSections || {},
         quizConfidence: parsed.quizConfidence || {},
+        readerNotes: {
+          chapters: parsed.readerNotes?.chapters || {},
+          sections: parsed.readerNotes?.sections || {},
+        },
+        examAttempts: parsed.examAttempts || {},
         lastLocation: parsed.lastLocation || null,
         uiPrefs: { ...DEFAULT_UI_PREFS, ...(parsed.uiPrefs || {}) },
       };
     } catch (_error) {
-      return { studiedSections: {}, quizConfidence: {}, lastLocation: null, uiPrefs: { ...DEFAULT_UI_PREFS } };
+      return {
+        studiedSections: {},
+        quizConfidence: {},
+        readerNotes: { chapters: {}, sections: {} },
+        examAttempts: {},
+        lastLocation: null,
+        uiPrefs: { ...DEFAULT_UI_PREFS },
+      };
     }
   }
 
@@ -146,14 +188,20 @@
     const snapshot = {
       studiedSections: progress.studiedSections,
       quizConfidence: progress.quizConfidence,
+      readerNotes: progress.readerNotes,
+      examAttempts: progress.examAttempts,
       lastLocation: {
         view: state.view,
         topic: state.topic,
         section: state.section,
+        examId: state.examId,
+        examQuestionIndex: state.examQuestionIndex,
       },
       uiPrefs: {
         readerScale: state.ui.readerScale,
         focusMode: state.ui.focusMode,
+        companionTab: state.ui.companionTab,
+        companionOpen: state.ui.companionOpen,
       },
     };
     window.localStorage.setItem(STORAGE_KEY, JSON.stringify(snapshot));
@@ -169,6 +217,8 @@
       view: params.get("view") || null,
       topic: params.get("topic") || null,
       section: params.get("section") || null,
+      exam: params.get("exam") || null,
+      question: params.get("question") || null,
     };
   }
 
@@ -178,6 +228,14 @@
     params.set("topic", state.topic);
     if (state.section) {
       params.set("section", state.section);
+    }
+    if (state.view === "exams" && state.examId) {
+      params.set("exam", state.examId);
+      const exam = examMap[state.examId];
+      const currentQuestion = exam?.questions?.[state.examQuestionIndex];
+      if (currentQuestion) {
+        params.set("question", currentQuestion.id);
+      }
     }
     const nextHash = `#${params.toString()}`;
     if (window.location.hash !== nextHash) {
@@ -211,6 +269,35 @@
     }
 
     if (state.view !== "reader" || isTypingTarget) {
+      if (state.view === "exams" && !isTypingTarget) {
+        const exam = examMap[state.examId];
+        const record = getExamRecord(state.examId);
+        const question = exam?.questions?.[state.examQuestionIndex];
+        if (!exam || !question) {
+          return;
+        }
+        if (event.key === "ArrowRight" && state.examQuestionIndex < exam.questions.length - 1) {
+          event.preventDefault();
+          state.examQuestionIndex += 1;
+          render();
+          return;
+        }
+        if (event.key === "ArrowLeft" && state.examQuestionIndex > 0) {
+          event.preventDefault();
+          state.examQuestionIndex -= 1;
+          render();
+          return;
+        }
+        if (!record.submittedAt && /^[1-5]$/.test(event.key)) {
+          const optionIndex = Number(event.key) - 1;
+          const option = question.options[optionIndex];
+          if (option) {
+            event.preventDefault();
+            setExamAnswer(state.examId, question.id, option.id);
+            render();
+          }
+        }
+      }
       return;
     }
 
@@ -286,6 +373,9 @@
         state.ui.sidebarOpen = false;
         applyShellState();
       }
+      if (state.view === "reader") {
+        updateReaderPaneLayout();
+      }
     });
 
     window.addEventListener("keydown", handleGlobalKeydown);
@@ -295,6 +385,10 @@
     state.view = view;
     if (view === "reader" && !state.section) {
       state.section = chapterMap[state.topic].sections[0]?.id || null;
+    }
+    if (view === "exams" && !examMap[state.examId] && exams[0]) {
+      state.examId = exams[0].id;
+      state.examQuestionIndex = 0;
     }
     state.ui.copyStatus = "";
     if (window.innerWidth <= MOBILE_SIDEBAR_BREAKPOINT) {
@@ -329,6 +423,67 @@
     const quizStats = getQuizStats();
     const studiedText = `${overall.studiedSections}/${overall.totalSections}`;
     const strongText = `${quizStats.strong}/${quizStats.total}`;
+    if (state.view === "exams") {
+      const exam = examMap[state.examId] || exams[0];
+      const record = getExamRecord(exam?.id);
+      const stats = getExamStats(exam, record);
+      els.heroStrip.classList.add("hero-strip-compact");
+      els.heroStrip.innerHTML = exam ? `
+        <article class="reader-summary-strip">
+          <div class="reader-summary-block">
+            <p class="eyebrow">Selected exam</p>
+            <strong>${escapeHtml(exam.title)}</strong>
+            <p>${escapeHtml(exam.description)}</p>
+          </div>
+          <div class="reader-summary-block">
+            <p class="eyebrow">Answered</p>
+            <strong>${stats.answered}/${stats.total}</strong>
+            <p>${stats.unanswered} questions still unanswered in this attempt.</p>
+          </div>
+          <div class="reader-summary-block">
+            <p class="eyebrow">Status</p>
+            <strong>${record.submittedAt ? `${stats.percent}%` : "In progress"}</strong>
+            <p>${record.submittedAt ? `${stats.correct} correct after submission.` : `Suggested time: ${exam.durationMinutes} minutes.`}</p>
+          </div>
+          <div class="reader-summary-block">
+            <p class="eyebrow">Coverage</p>
+            <strong>${stats.topicCount} topics</strong>
+            <p>Every exam mixes all course topics from unsupervised learning through generative AI.</p>
+          </div>
+        </article>
+      ` : "";
+      return;
+    }
+    if (state.view === "reader") {
+      const currentSection = sectionMap.get(state.section)?.section || chapter.sections[0];
+      els.heroStrip.classList.add("hero-strip-compact");
+      els.heroStrip.innerHTML = `
+        <article class="reader-summary-strip">
+          <div class="reader-summary-block">
+            <p class="eyebrow">Current chapter</p>
+            <strong>${escapeHtml(chapter.shortTitle)}</strong>
+            <p>${escapeHtml(chapter.summary)}</p>
+          </div>
+          <div class="reader-summary-block">
+            <p class="eyebrow">Coverage</p>
+            <strong>${studiedText}</strong>
+            <p>${overall.percent}% of all deep-reader sections marked studied.</p>
+          </div>
+          <div class="reader-summary-block">
+            <p class="eyebrow">Practice</p>
+            <strong>${strongText}</strong>
+            <p>${quizStats.pending} prompts still need a confidence mark.</p>
+          </div>
+          <div class="reader-summary-block">
+            <p class="eyebrow">Current section</p>
+            <strong>${escapeHtml(stripSectionNumber(currentSection.title))}</strong>
+            <p>${currentSection.readMinutes} min read, ${currentSection.wordCount} words.</p>
+          </div>
+        </article>
+      `;
+      return;
+    }
+    els.heroStrip.classList.remove("hero-strip-compact");
     els.heroStrip.innerHTML = `
       <article class="hero-card">
         <p class="eyebrow">Coverage</p>
@@ -391,6 +546,9 @@
       case "reader":
         renderReader();
         break;
+      case "exams":
+        renderExams();
+        break;
       case "practice":
         renderPractice();
         break;
@@ -430,6 +588,7 @@
           </p>
           <div class="action-row" style="margin-top:1rem;">
             <button class="primary-button" data-dashboard-action="reader">Open Deep Reader</button>
+            <button class="secondary-button" data-dashboard-action="exams">Take Full Exam</button>
             <button class="secondary-button" data-dashboard-action="practice">Start Practice</button>
             <button class="secondary-button" data-dashboard-action="lab">Use Concept Lab</button>
           </div>
@@ -460,6 +619,31 @@
               </ul>
             </article>
           `).join("")}
+        </div>
+      </section>
+
+      <section class="panel" style="padding:1.3rem;">
+        <p class="eyebrow">Exam Mode</p>
+        <h3 class="panel-title" style="margin-top:0.2rem;">Three Full Mixed Finals</h3>
+        <div class="topic-card-grid" style="margin-top:1rem;">
+          ${exams.map((exam) => {
+            const examRecord = getExamRecord(exam.id);
+            const examStats = getExamStats(exam, examRecord);
+            return `
+              <article class="card topic-card">
+                <div class="chip-row">
+                  <span class="chip">${exam.questions.length} questions</span>
+                  <span class="chip">${exam.durationMinutes} min</span>
+                  <span class="chip">${examRecord.submittedAt ? `${examStats.percent}% last score` : `${examStats.answered}/${examStats.total} answered`}</span>
+                </div>
+                <h4 style="margin-top:0.9rem;">${escapeHtml(exam.title)}</h4>
+                <p>${escapeHtml(exam.description)}</p>
+                <div class="action-row" style="margin-top:1rem;">
+                  <button class="secondary-button" data-open-exam="${exam.id}">Open Exam</button>
+                </div>
+              </article>
+            `;
+          }).join("")}
         </div>
       </section>
 
@@ -548,6 +732,355 @@
         setView("practice");
       });
     });
+
+    els.viewRoot.querySelectorAll("[data-open-exam]").forEach((button) => {
+      button.addEventListener("click", () => {
+        state.examId = button.dataset.openExam;
+        state.examQuestionIndex = 0;
+        setView("exams");
+      });
+    });
+  }
+
+  function stripSectionNumber(title) {
+    return (title || "").replace(/^\d+(?:\.\d+)*\s*/, "").trim();
+  }
+
+  function lowerFirst(text) {
+    if (!text) {
+      return "";
+    }
+    return text.charAt(0).toLowerCase() + text.slice(1);
+  }
+
+  function sentenceSplit(text) {
+    return (text || "")
+      .replace(/\s+/g, " ")
+      .split(/(?<=[.!?])\s+/)
+      .map((sentence) => sentence.trim())
+      .filter(Boolean);
+  }
+
+  function extractSectionParagraphs(section) {
+    const fragment = document.createElement("div");
+    fragment.innerHTML = section.html || "";
+    const paragraphs = Array.from(fragment.querySelectorAll("p"))
+      .map((node) => node.textContent.replace(/\s+/g, " ").trim())
+      .filter(Boolean);
+    return paragraphs.length ? paragraphs : [section.searchText].filter(Boolean);
+  }
+
+  function extractSectionHeadings(section) {
+    const fragment = document.createElement("div");
+    fragment.innerHTML = section.html || "";
+    return Array.from(fragment.querySelectorAll("h4, h5")).map((node, index) => ({
+      id: `reader-heading-${index + 1}`,
+      level: node.tagName.toLowerCase(),
+      title: node.textContent.replace(/\s+/g, " ").trim(),
+    }));
+  }
+
+  function tokenizeForMatch(text) {
+    return (text || "")
+      .toLowerCase()
+      .replace(/[^a-z0-9\s]/g, " ")
+      .split(/\s+/)
+      .filter((token) => token && token.length > 2 && !["the", "and", "for", "with", "that", "this", "from", "into", "why", "what"].includes(token));
+  }
+
+  function keywordScore(sourceText, candidateText) {
+    const sourceTokens = new Set(tokenizeForMatch(sourceText));
+    const candidateTokens = tokenizeForMatch(candidateText);
+    if (!sourceTokens.size || !candidateTokens.length) {
+      return 0;
+    }
+    let score = 0;
+    candidateTokens.forEach((token) => {
+      if (sourceTokens.has(token)) {
+        score += 1;
+      }
+    });
+    return score;
+  }
+
+  function pickRelevantItems(sectionTitle, sectionText, items, getText, limit = 2) {
+    const scored = items
+      .map((item, index) => ({
+        item,
+        index,
+        score: keywordScore(`${sectionTitle} ${sectionText}`, getText(item)),
+      }))
+      .sort((left, right) => {
+        if (right.score !== left.score) {
+          return right.score - left.score;
+        }
+        return left.index - right.index;
+      });
+
+    const positive = scored.filter((entry) => entry.score > 0).slice(0, limit).map((entry) => entry.item);
+    if (positive.length) {
+      return positive;
+    }
+    return items.slice(0, limit);
+  }
+
+  function buildSectionToolkit(chapter, currentSection, prevSection, nextSection, sectionIndex) {
+    const concept = stripSectionNumber(currentSection.title);
+    const paragraphs = extractSectionParagraphs(currentSection);
+    const sentences = sentenceSplit(paragraphs.join(" "));
+    const headings = extractSectionHeadings(currentSection);
+    const bestGoal = pickRelevantItems(currentSection.title, currentSection.searchText, chapter.goals, (item) => item, 1)[0] || chapter.goals[0];
+    const bestTrap = pickRelevantItems(currentSection.title, currentSection.searchText, chapter.traps, (item) => item, 1)[0] || chapter.traps[0];
+    const relatedEquations = pickRelevantItems(
+      currentSection.title,
+      currentSection.searchText,
+      chapter.equationNotebook || [],
+      (item) => `${item.label} ${item.meaning} ${item.intuition}`,
+      2,
+    );
+    const relatedExamples = pickRelevantItems(
+      currentSection.title,
+      currentSection.searchText,
+      chapter.workedExamples || [],
+      (item) => `${item.title} ${item.searchText}`,
+      2,
+    );
+    const chapterComparisons = data.compareDecks.filter((item) => item.topic === chapter.slug);
+    const relatedComparisons = pickRelevantItems(
+      currentSection.title,
+      currentSection.searchText,
+      chapterComparisons,
+      (item) => `${item.prompt} ${item.answer}`,
+      2,
+    );
+    const starterQuestion = pickRelevantItems(currentSection.title, currentSection.searchText, chapter.starterQuestions, (item) => item, 1)[0];
+
+    const openingSentence = sentences[0] || `${concept} is an important idea in ${chapter.shortTitle}.`;
+    const followUpSentence = sentences[1] || paragraphs[1] || "";
+    const explanationParagraphs = [
+      `In slow, plain language, this section says that ${lowerFirst(openingSentence.replace(/[.!?]+$/, ""))}.`,
+      followUpSentence
+        ? `The next thing to notice is that ${lowerFirst(followUpSentence.replace(/[.!?]+$/, ""))}.`
+        : `Inside this chapter, the real point is ${lowerFirst(bestGoal.replace(/[.!?]+$/, ""))}.`,
+      nextSection
+        ? `This section matters because it helps you walk from ${stripSectionNumber(prevSection?.title || chapter.title).toLowerCase()} toward ${stripSectionNumber(nextSection.title).toLowerCase()} without losing the underlying idea.`
+        : `This section matters because it helps turn the chapter from a list of terms into an organized mental model you can explain under exam pressure.`,
+    ];
+
+    const whyItMatters = nextSection
+      ? `If this section stays fuzzy, the jump into ${stripSectionNumber(nextSection.title)} gets harder because the course expects you to carry this idea forward, not relearn it from scratch.`
+      : `This section is part of the chapter wrap-up logic. It is where you make sure the topic now feels organized rather than scattered.`;
+
+    const connectionLine = prevSection && nextSection
+      ? `You just came from ${stripSectionNumber(prevSection.title)} and this section points directly into ${stripSectionNumber(nextSection.title)}.`
+      : prevSection
+        ? `This section closes a chain that was built from ${stripSectionNumber(prevSection.title)} earlier in the chapter.`
+        : nextSection
+          ? `This is the chapter entry point, so it is doing foundational work before ${stripSectionNumber(nextSection.title)} adds more detail.`
+          : `This section stands on its own as a compact chapter checkpoint.`;
+
+    const recallQuestions = [
+      `What problem is ${concept.toLowerCase()} trying to solve, and what would break if we removed it?`,
+      starterQuestion || `How would you explain ${concept.toLowerCase()} to someone who only remembers the chapter title?`,
+      nextSection
+        ? `How does ${concept.toLowerCase()} prepare you for ${stripSectionNumber(nextSection.title).toLowerCase()}?`
+        : `How does ${concept.toLowerCase()} fit into the chapter as a whole rather than as an isolated fact?`,
+    ];
+
+    return {
+      concept,
+      explanationParagraphs,
+      whyItMatters,
+      commonConfusion: bestTrap,
+      connectionLine,
+      recallQuestions,
+      headings,
+      relatedEquations,
+      relatedExamples,
+      relatedComparisons,
+      sectionNumberLabel: `Section ${sectionIndex + 1} of ${chapter.sections.length}`,
+    };
+  }
+
+  function getChapterNote(topic) {
+    return progress.readerNotes?.chapters?.[topic] || "";
+  }
+
+  function getSectionNote(sectionId) {
+    return progress.readerNotes?.sections?.[sectionId] || "";
+  }
+
+  function saveReaderNote(scope, key, value) {
+    if (!progress.readerNotes) {
+      progress.readerNotes = { chapters: {}, sections: {} };
+    }
+    progress.readerNotes[scope][key] = value;
+    saveProgress();
+  }
+
+  function renderCompanionContent(chapter, currentSection, sectionToolkit) {
+    if (state.ui.companionTab === "orientation") {
+      return `
+        <div class="companion-stack">
+          <section class="companion-card">
+            <p class="eyebrow">Chapter Orientation</p>
+            <h4>Big-Picture Context</h4>
+            <div class="reader-copy compact-copy">${chapter.introHtml}</div>
+          </section>
+          <section class="companion-card">
+            <h4>Plain-English Map</h4>
+            <div class="reader-copy compact-copy">${chapter.plainEnglishHtml}</div>
+          </section>
+          <section class="companion-card">
+            <h4>Mental Model</h4>
+            <div class="reader-copy compact-copy">${chapter.mentalModelHtml}</div>
+          </section>
+          <section class="companion-card">
+            <h4>Bridge Forward</h4>
+            <div class="reader-copy compact-copy">${chapter.bridgeForwardHtml}</div>
+          </section>
+        </div>
+      `;
+    }
+
+    if (state.ui.companionTab === "notebook") {
+      return `
+        <div class="companion-stack">
+          <section class="companion-card">
+            <p class="eyebrow">Section-First Notebook</p>
+            <h4>Most Relevant Equations</h4>
+            <div class="companion-card-grid">
+              ${sectionToolkit.relatedEquations.map((equation) => `
+                <article class="equation-card compact-card">
+                  <h5>${escapeHtml(equation.label)}</h5>
+                  <div class="equation-tex">\\[${equation.latex}\\]</div>
+                  <p><strong>Meaning:</strong> ${escapeHtml(equation.meaning)}</p>
+                </article>
+              `).join("")}
+            </div>
+          </section>
+          <section class="companion-card">
+            <h4>Full Chapter Equation Notebook</h4>
+            <div class="companion-stack dense-stack">
+              ${chapter.equationNotebook.map((equation) => `
+                <article class="equation-card compact-card">
+                  <h5>${escapeHtml(equation.label)}</h5>
+                  <div class="equation-tex">\\[${equation.latex}\\]</div>
+                  <p><strong>Meaning:</strong> ${escapeHtml(equation.meaning)}</p>
+                  <p><strong>Intuition:</strong> ${escapeHtml(equation.intuition)}</p>
+                </article>
+              `).join("")}
+            </div>
+          </section>
+        </div>
+      `;
+    }
+
+    if (state.ui.companionTab === "examples") {
+      return `
+        <div class="companion-stack">
+          <section class="companion-card">
+            <p class="eyebrow">Worked Examples</p>
+            <h4>Examples Closest To This Section</h4>
+            <div class="companion-stack dense-stack">
+              ${sectionToolkit.relatedExamples.map((example) => `
+                <article class="worked-card compact-card">
+                  <h5>${escapeHtml(example.title)}</h5>
+                  <div class="reader-copy compact-copy">
+                    <p><strong>Scenario</strong></p>
+                    ${example.scenarioHtml}
+                    <p><strong>Walkthrough</strong></p>
+                    ${example.walkthroughHtml}
+                  </div>
+                </article>
+              `).join("")}
+            </div>
+          </section>
+          <section class="companion-card">
+            <h4>Comparison Prompts</h4>
+            <div class="companion-stack dense-stack">
+              ${sectionToolkit.relatedComparisons.map((item) => `
+                <article class="mini-panel compact-card">
+                  <h5>${escapeHtml(item.prompt)}</h5>
+                  <p class="subtle">${escapeHtml(item.answer)}</p>
+                </article>
+              `).join("")}
+            </div>
+          </section>
+        </div>
+      `;
+    }
+
+    if (state.ui.companionTab === "mastery") {
+      return `
+        <div class="companion-stack">
+          <section class="companion-card">
+            <p class="eyebrow">Mastery</p>
+            <h4>What To Understand</h4>
+            <ul class="md-list">
+              ${chapter.goals.map((goal) => `<li>${escapeHtml(goal)}</li>`).join("")}
+            </ul>
+          </section>
+          <section class="companion-card">
+            <h4>Common Exam Traps</h4>
+            <ul class="md-list">
+              ${chapter.traps.map((trap) => `<li>${escapeHtml(trap)}</li>`).join("")}
+            </ul>
+          </section>
+          <section class="companion-card">
+            <h4>Mastery Checklist</h4>
+            <ul class="md-list">
+              ${chapter.masteryChecklist.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}
+            </ul>
+          </section>
+          <section class="companion-card">
+            <h4>Warm-Up Questions</h4>
+            <ul class="md-list">
+              ${chapter.starterQuestions.map((question) => `<li>${escapeHtml(question)}</li>`).join("")}
+            </ul>
+          </section>
+        </div>
+      `;
+    }
+
+    return `
+      <div class="companion-stack">
+        <section class="companion-card">
+          <p class="eyebrow">Notebook</p>
+          <h4>Chapter Notes</h4>
+          <label class="sidebar-field">
+            <span>Saved in this browser for ${escapeHtml(chapter.shortTitle)}</span>
+            <textarea id="chapter-note-input" class="notes-input" placeholder="Write your own chapter summary, confusions, mnemonics, or formula reminders here.">${escapeHtml(getChapterNote(chapter.slug))}</textarea>
+          </label>
+        </section>
+        <section class="companion-card">
+          <h4>Section Notes</h4>
+          <label class="sidebar-field">
+            <span>Saved for ${escapeHtml(stripSectionNumber(currentSection.title))}</span>
+            <textarea id="section-note-input" class="notes-input" placeholder="Capture what finally made this section click for you, plus anything you still need to revisit.">${escapeHtml(getSectionNote(currentSection.id))}</textarea>
+          </label>
+          <p class="reader-shortcut-note">Notes autosave locally as you type, so you can build your own exam-ready notebook over time.</p>
+        </section>
+      </div>
+    `;
+  }
+
+  function updateReaderPaneLayout() {
+    window.requestAnimationFrame(() => {
+      const layout = document.getElementById("reader-layout");
+      if (!layout) {
+        return;
+      }
+      if (window.innerWidth <= MOBILE_SIDEBAR_BREAKPOINT || state.ui.focusMode) {
+        layout.style.removeProperty("--reader-sticky-top");
+        layout.style.removeProperty("--reader-sidebar-height");
+        return;
+      }
+      const stickyTop = 18;
+      const availableHeight = Math.max(360, window.innerHeight - stickyTop - 18);
+      layout.style.setProperty("--reader-sticky-top", `${stickyTop}px`);
+      layout.style.setProperty("--reader-sidebar-height", `${availableHeight}px`);
+    });
   }
 
   function renderReader() {
@@ -565,7 +1098,7 @@
       !sectionFilterQuery || section.title.toLowerCase().includes(sectionFilterQuery),
     );
     const nextUnstudied = chapter.sections.find((section) => !progress.studiedSections[section.id]) || null;
-    const chapterOrientationHtml = chapter.introHtml.replace(/<figure class="md-figure[\s\S]*?<\/figure>/g, "");
+    const sectionToolkit = buildSectionToolkit(chapter, currentSection, prevSection, nextSection, sectionIndex);
     const sectionHero = currentSection.figureSrc
       ? `
         <figure class="md-figure section-hero">
@@ -576,8 +1109,8 @@
       : "";
 
     els.viewRoot.innerHTML = `
-      <section class="reader-layout">
-        <aside class="reader-sidebar">
+      <section class="reader-layout" id="reader-layout">
+        <aside class="reader-sidebar" id="reader-sidebar-pane">
           <p class="eyebrow">${escapeHtml(chapter.badge)}</p>
           <h3 class="section-title" style="margin-top:0.2rem;">${escapeHtml(chapter.title)}</h3>
           <p class="subtle small">${escapeHtml(chapter.summary)}</p>
@@ -610,13 +1143,13 @@
           </div>
         </aside>
 
-        <article class="reader-content">
+        <article class="reader-content" id="reader-content-pane">
           <div class="reader-header">
             <div>
               <p class="eyebrow">Current Section</p>
               <h3>${escapeHtml(currentSection.title)}</h3>
               <div class="reader-meta">
-                <span class="meta-pill">Section ${sectionIndex + 1} of ${chapter.sections.length}</span>
+                <span class="meta-pill">${sectionToolkit.sectionNumberLabel}</span>
                 <span class="meta-pill">${currentSection.readMinutes} min</span>
                 <span class="meta-pill">${currentSection.wordCount} words</span>
                 <span class="meta-pill">${studied ? "Studied" : "Not marked yet"}</span>
@@ -647,94 +1180,84 @@
 
           ${state.ui.copyStatus ? `<p class="reader-status-note">${escapeHtml(state.ui.copyStatus)}</p>` : ""}
 
-          <div class="reader-copy">
-            ${sectionHero}
-            <div class="mini-panel" style="margin-bottom:1rem;">
-              <h4>Chapter orientation and big-picture context</h4>
-              ${chapterOrientationHtml}
-            </div>
-            ${currentSection.html}
-          </div>
-
-          <section class="panel" style="padding:1rem; margin-top:1rem;">
-            <p class="eyebrow">Understanding Layer</p>
-            <h3 class="panel-title" style="margin-top:0.2rem;">Plain-English Map And Mental Model</h3>
-            <div class="dashboard-grid" style="margin-top:1rem;">
-              <article class="roadmap-card">
-                <h4>Plain-English map</h4>
-                <div class="reader-copy">${chapter.plainEnglishHtml}</div>
-              </article>
-              <article class="roadmap-card">
-                <h4>Mental model</h4>
-                <div class="reader-copy">${chapter.mentalModelHtml}</div>
-              </article>
-              <article class="roadmap-card">
-                <h4>Bridge forward</h4>
-                <div class="reader-copy">${chapter.bridgeForwardHtml}</div>
-              </article>
+          <section class="lesson-panel">
+            <p class="eyebrow">Section Lesson</p>
+            <h3 class="panel-title" style="margin-top:0.2rem;">Unique Lesson Content</h3>
+            <p class="subtle section-lesson-note">The main lesson stays here in full reading flow. Chapter-wide support material is tucked into the collapsed chapter companion below so the repeated guidance does not crowd the section itself.</p>
+            <div class="reader-copy">
+              ${sectionHero}
+              ${currentSection.html}
             </div>
           </section>
 
-          <section class="panel" style="padding:1rem; margin-top:1rem;">
-            <p class="eyebrow">Equation Notebook</p>
-            <h3 class="panel-title" style="margin-top:0.2rem;">Key Equations With Meaning</h3>
-            <div class="equation-grid" style="margin-top:1rem;">
-              ${chapter.equationNotebook.map((equation) => `
-                <article class="equation-card">
-                  <h4>${escapeHtml(equation.label)}</h4>
-                  <div class="equation-tex">\\[${equation.latex}\\]</div>
-                  <p><strong>Meaning:</strong> ${escapeHtml(equation.meaning)}</p>
-                  <p><strong>Intuition:</strong> ${escapeHtml(equation.intuition)}</p>
-                </article>
-              `).join("")}
-            </div>
-          </section>
-
-          <section class="panel" style="padding:1rem; margin-top:1rem;">
-            <p class="eyebrow">Worked Examples</p>
-            <h3 class="panel-title" style="margin-top:0.2rem;">How To Reason Through The Topic</h3>
-            <div class="worked-grid" style="margin-top:1rem;">
-              ${chapter.workedExamples.map((example) => `
-                <article class="worked-card">
-                  <h4>${escapeHtml(example.title)}</h4>
-                  <div class="reader-copy">
-                    <p><strong>Scenario</strong></p>
-                    ${example.scenarioHtml}
-                    <p><strong>Walkthrough</strong></p>
-                    ${example.walkthroughHtml}
+          <section class="panel section-toolkit-panel">
+            <p class="eyebrow">Deep Understanding Layer</p>
+            <h3 class="panel-title" style="margin-top:0.2rem;">Linear Study Notes</h3>
+            <div class="study-doc">
+              <section class="study-doc-block">
+                <h4>Section In One Breath</h4>
+                <div class="reader-copy compact-copy">
+                  ${sectionToolkit.explanationParagraphs.map((paragraph) => `<p>${escapeHtml(paragraph)}</p>`).join("")}
+                </div>
+              </section>
+              <section class="study-doc-block">
+                <h4>What To Keep In View</h4>
+                <p>${escapeHtml(sectionToolkit.whyItMatters)}</p>
+                <p class="subtle">${escapeHtml(sectionToolkit.connectionLine)}</p>
+              </section>
+              <section class="study-doc-block">
+                <h4>Reading Roadmap</h4>
+                ${sectionToolkit.headings.length ? `
+                  <div class="outline-list linear-outline-list">
+                    ${sectionToolkit.headings.map((heading) => `
+                      <button class="outline-link ${heading.level === "h5" ? "is-subheading" : ""}" data-scroll-heading="${heading.id}">
+                        ${escapeHtml(heading.title)}
+                      </button>
+                    `).join("")}
                   </div>
-                </article>
-              `).join("")}
+                ` : `<p class="subtle">This section reads as one continuous explanation, so focus on how the idea develops from the opening statement to the final consequence.</p>`}
+              </section>
+              <section class="study-doc-block">
+                <h4>Self-Check Prompts</h4>
+                <p class="subtle">Use these only after you have read the section once without peeking. If you cannot answer them cleanly, reread the nearest heading block rather than restarting the entire chapter.</p>
+                <ul class="md-list">
+                  ${sectionToolkit.recallQuestions.map((question) => `<li>${escapeHtml(question)}</li>`).join("")}
+                </ul>
+              </section>
             </div>
           </section>
 
-          <div class="reader-bottom-grid">
-            <section class="mini-panel">
-              <h4>What to understand</h4>
-              <ul>
-                ${chapter.goals.map((goal) => `<li>${escapeHtml(goal)}</li>`).join("")}
-              </ul>
-            </section>
-            <section class="mini-panel">
-              <h4>Common exam traps</h4>
-              <ul>
-                ${chapter.traps.map((trap) => `<li>${escapeHtml(trap)}</li>`).join("")}
-              </ul>
-            </section>
-            <section class="mini-panel">
-              <h4>Mastery checklist</h4>
-              <ul>
-                ${chapter.masteryChecklist.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}
-              </ul>
-            </section>
-          </div>
-
-          <section class="panel" style="padding:1rem; margin-top:1rem;">
-            <p class="eyebrow">Self-check</p>
-            <h3 class="panel-title" style="margin-top:0.2rem;">Warm-up questions for this topic</h3>
-            <ul class="md-list" style="margin-top:0.8rem;">
-              ${chapter.starterQuestions.map((question) => `<li>${escapeHtml(question)}</li>`).join("")}
-            </ul>
+          <section class="panel chapter-companion-dock ${state.ui.companionOpen ? "is-open" : "is-collapsed"}" id="chapter-companion-dock">
+            <div class="companion-header">
+              <div>
+                <p class="eyebrow">Chapter Companion</p>
+                <h3 class="section-title" style="margin-top:0.2rem;">Persistent Study Desk</h3>
+                <p class="subtle small">Orientation, notebook, worked examples, mastery checks, and notes live here. It stays collapsed by default so the main reading flow remains cleaner.</p>
+              </div>
+              <button class="tiny-button" id="companion-toggle-button" aria-expanded="${state.ui.companionOpen ? "true" : "false"}">
+                ${state.ui.companionOpen ? "Collapse Companion" : "Open Companion"}
+              </button>
+            </div>
+            ${state.ui.companionOpen ? `
+              <div class="companion-tab-row" role="tablist" aria-label="Chapter companion tabs">
+                ${[
+                  ["orientation", "Orientation"],
+                  ["notebook", "Notebook"],
+                  ["examples", "Examples"],
+                  ["mastery", "Mastery"],
+                  ["notes", "My Notes"],
+                ].map(([value, label]) => `
+                  <button class="companion-tab ${state.ui.companionTab === value ? "is-active" : ""}" data-companion-tab="${value}" role="tab" aria-selected="${state.ui.companionTab === value ? "true" : "false"}">
+                    ${label}
+                  </button>
+                `).join("")}
+              </div>
+              <div class="companion-body">
+                ${renderCompanionContent(chapter, currentSection, sectionToolkit)}
+              </div>
+            ` : `
+              <p class="companion-collapsed-copy">Open this when you want chapter orientation, equation notebooks, worked examples, mastery checklists, or a place to write notes without interrupting the section narrative.</p>
+            `}
           </section>
         </article>
       </section>
@@ -796,8 +1319,325 @@
       render();
     });
 
+    document.getElementById("companion-toggle-button")?.addEventListener("click", () => {
+      state.ui.companionOpen = !state.ui.companionOpen;
+      render();
+    });
+
+    els.viewRoot.querySelectorAll("[data-companion-tab]").forEach((button) => {
+      button.addEventListener("click", () => {
+        state.ui.companionTab = button.dataset.companionTab;
+        state.ui.companionOpen = true;
+        render();
+      });
+    });
+
     document.getElementById("copy-section-link-button")?.addEventListener("click", async () => {
       await copyCurrentSectionLink();
+    });
+
+    document.getElementById("chapter-note-input")?.addEventListener("input", (event) => {
+      saveReaderNote("chapters", chapter.slug, event.target.value);
+    });
+
+    document.getElementById("section-note-input")?.addEventListener("input", (event) => {
+      saveReaderNote("sections", currentSection.id, event.target.value);
+    });
+
+    const readerCopy = els.viewRoot.querySelector(".reader-copy");
+    if (readerCopy) {
+      Array.from(readerCopy.querySelectorAll("h4, h5")).forEach((heading, index) => {
+        if (sectionToolkit.headings[index]) {
+          heading.id = sectionToolkit.headings[index].id;
+        }
+      });
+    }
+
+    els.viewRoot.querySelectorAll("[data-scroll-heading]").forEach((button) => {
+      button.addEventListener("click", () => {
+        const target = document.getElementById(button.dataset.scrollHeading);
+        if (!target) {
+          return;
+        }
+        const targetTop = window.scrollY + target.getBoundingClientRect().top - 18;
+        window.scrollTo({ top: Math.max(0, targetTop), behavior: "smooth" });
+      });
+    });
+
+    updateReaderPaneLayout();
+  }
+
+  function renderExams() {
+    if (!exams.length) {
+      els.viewRoot.innerHTML = `<section class="panel" style="padding:1.2rem;"><div class="empty-state">No exam sets are loaded yet.</div></section>`;
+      return;
+    }
+
+    const exam = examMap[state.examId] || exams[0];
+    state.examId = exam.id;
+    const record = getExamRecord(exam.id);
+    const stats = getExamStats(exam, record);
+    if (state.examQuestionIndex >= exam.questions.length) {
+      state.examQuestionIndex = 0;
+    }
+    const currentQuestion = exam.questions[state.examQuestionIndex] || exam.questions[0];
+    const currentAnswer = record.answers[currentQuestion.id] || null;
+    const topicBreakdown = getExamTopicBreakdown(exam, record);
+    const unansweredIndex = exam.questions.findIndex((question) => !record.answers[question.id]);
+    const currentExplanation = record.submittedAt
+      ? `<div class="exam-explanation ${currentAnswer === currentQuestion.answer ? "is-correct" : "is-wrong"}">
+          <p class="eyebrow">${currentAnswer === currentQuestion.answer ? "Correct" : "Review"}</p>
+          <h4>${currentAnswer === currentQuestion.answer ? "Why this answer works" : `Correct answer: ${currentQuestion.answer}`}</h4>
+          <p>${escapeHtml(currentQuestion.explanation)}</p>
+        </div>`
+      : "";
+
+    els.viewRoot.innerHTML = `
+      <section class="panel exam-selector-panel">
+        <div class="section-title-row">
+          <p class="eyebrow">Full Mixed Finals</p>
+          <h3 class="panel-title" style="margin-top:0.2rem;">Three Comprehensive Exam Sets</h3>
+          <p class="subtle">Each set spans unsupervised learning through generative AI. Use them as full-length mixed practice, not as tiny topic drills.</p>
+        </div>
+        <div class="exam-selector-grid">
+          ${exams.map((item) => {
+            const itemRecord = getExamRecord(item.id);
+            const itemStats = getExamStats(item, itemRecord);
+            const latestAttempt = itemRecord.attempts?.[itemRecord.attempts.length - 1] || null;
+            return `
+              <button class="exam-set-card ${item.id === exam.id ? "is-active" : ""}" data-exam-id="${item.id}">
+                <p class="eyebrow">Set ${escapeHtml(item.label || item.title.replace(/^.*Set\s+/i, ""))}</p>
+                <h4>${escapeHtml(item.title)}</h4>
+                <p>${escapeHtml(item.description)}</p>
+                <div class="chip-row">
+                  <span class="chip">${item.questions.length} questions</span>
+                  <span class="chip">${item.durationMinutes} min</span>
+                  <span class="chip">${itemRecord.submittedAt ? `${itemStats.percent}% last score` : `${itemStats.answered}/${itemStats.total} answered`}</span>
+                </div>
+                ${latestAttempt ? `<p class="subtle small">Latest completed attempt: ${latestAttempt.correct}/${latestAttempt.total} correct.</p>` : `<p class="subtle small">Not submitted yet. You can leave and come back; answers persist locally.</p>`}
+              </button>
+            `;
+          }).join("")}
+        </div>
+      </section>
+
+      <section class="exam-layout">
+        <aside class="exam-sidebar panel">
+          <div class="exam-sidebar-block">
+            <p class="eyebrow">Exam status</p>
+            <h3 class="section-title" style="margin-top:0.2rem;">${escapeHtml(exam.title)}</h3>
+            <p class="subtle">${escapeHtml(exam.description)}</p>
+            <div class="reader-meta">
+              <span class="meta-pill">${exam.questions.length} questions</span>
+              <span class="meta-pill">${exam.durationMinutes} min</span>
+              <span class="meta-pill">${record.submittedAt ? "Submitted" : "In progress"}</span>
+            </div>
+          </div>
+
+          <div class="exam-sidebar-block">
+            <div class="sidebar-title-row">
+              <strong>Progress</strong>
+              <span>${stats.answered}/${stats.total}</span>
+            </div>
+            <div class="topic-meter"><span style="width:${stats.answeredPercent}%"></span></div>
+            <p class="subtle small">${stats.unanswered} unanswered. ${record.submittedAt ? `${stats.correct} correct, ${stats.total - stats.correct} incorrect.` : "Keyboard: 1-5 to choose an option, arrows to move."}</p>
+          </div>
+
+          <div class="exam-sidebar-block">
+            <div class="sidebar-title-row">
+              <strong>Question palette</strong>
+              <span>${state.examQuestionIndex + 1}/${stats.total}</span>
+            </div>
+            <div class="exam-question-palette">
+              ${exam.questions.map((question, index) => {
+                const answer = record.answers[question.id];
+                const isCorrect = answer && answer === question.answer;
+                const isWrong = answer && answer !== question.answer;
+                return `
+                  <button class="exam-palette-button ${index === state.examQuestionIndex ? "is-current" : ""} ${answer ? "is-answered" : ""} ${record.submittedAt && isCorrect ? "is-correct" : ""} ${record.submittedAt && isWrong ? "is-wrong" : ""}" data-exam-question-index="${index}">
+                    ${index + 1}
+                  </button>
+                `;
+              }).join("")}
+            </div>
+            ${unansweredIndex >= 0 ? `<button class="tiny-button" id="jump-unanswered-button" style="margin-top:0.8rem;">Jump To Next Unanswered</button>` : ""}
+          </div>
+
+          <div class="exam-sidebar-block">
+            <div class="sidebar-title-row">
+              <strong>Coverage</strong>
+              <span>${topicBreakdown.length} topics</span>
+            </div>
+            <div class="exam-topic-list">
+              ${topicBreakdown.map((topic) => `
+                <article class="mini-panel exam-topic-item">
+                  <h4>${escapeHtml(getTopicLabel(topic.topic))}</h4>
+                  <p class="subtle">${topic.total} questions${record.submittedAt ? `, ${topic.correct} correct` : ""}</p>
+                </article>
+              `).join("")}
+            </div>
+          </div>
+        </aside>
+
+        <article class="exam-main">
+          ${record.submittedAt ? `
+            <section class="panel exam-score-panel">
+              <p class="eyebrow">Submitted Result</p>
+              <h3 class="panel-title" style="margin-top:0.2rem;">${stats.correct}/${stats.total} Correct (${stats.percent}%)</h3>
+              <div class="exam-score-grid">
+                ${topicBreakdown.map((topic) => `
+                  <article class="metric-box exam-score-box">
+                    <strong>${topic.correct}/${topic.total}</strong>
+                    <span>${escapeHtml(getTopicLabel(topic.topic))}</span>
+                  </article>
+                `).join("")}
+              </div>
+            </section>
+          ` : ""}
+
+          <section class="panel exam-question-panel">
+            <div class="reader-header">
+              <div>
+                <p class="eyebrow">Question ${state.examQuestionIndex + 1} of ${exam.questions.length}</p>
+                <h3>${escapeHtml(currentQuestion.prompt)}</h3>
+                <div class="reader-meta">
+                  <span class="meta-pill">${escapeHtml(getTopicLabel(currentQuestion.topic))}</span>
+                  <span class="meta-pill">${escapeHtml(currentQuestion.difficulty)}</span>
+                  <span class="meta-pill">${escapeHtml(currentQuestion.focus)}</span>
+                </div>
+              </div>
+              <div class="action-row">
+                ${state.examQuestionIndex > 0 ? `<button class="secondary-button" id="exam-prev-button">Previous</button>` : ""}
+                ${state.examQuestionIndex < exam.questions.length - 1 ? `<button class="secondary-button" id="exam-next-button">Next</button>` : ""}
+              </div>
+            </div>
+
+            <div class="exam-options">
+              ${currentQuestion.options.map((option, optionIndex) => {
+                const isSelected = currentAnswer === option.id;
+                const isCorrect = option.id === currentQuestion.answer;
+                const classes = [
+                  "exam-option",
+                  isSelected ? "is-selected" : "",
+                  record.submittedAt && isCorrect ? "is-correct" : "",
+                  record.submittedAt && isSelected && !isCorrect ? "is-wrong" : "",
+                ].filter(Boolean).join(" ");
+                return `
+                  <button class="${classes}" data-exam-option="${option.id}" ${record.submittedAt ? "disabled" : ""}>
+                    <span class="exam-option-letter">${option.id}</span>
+                    <span class="exam-option-copy">${escapeHtml(option.text)}</span>
+                    <span class="exam-option-index">${optionIndex + 1}</span>
+                  </button>
+                `;
+              }).join("")}
+            </div>
+
+            ${currentExplanation}
+
+            <div class="exam-footer-actions">
+              ${!record.submittedAt ? `
+                <button class="primary-button" id="submit-exam-button">${stats.unanswered ? `Submit With ${stats.unanswered} Unanswered` : "Submit Exam"}</button>
+                <button class="secondary-button" id="reset-exam-button">Clear Attempt</button>
+              ` : `
+                <button class="primary-button" id="retake-exam-button">Retake This Exam</button>
+                <button class="secondary-button" id="reset-exam-button">Clear Saved Answers</button>
+              `}
+            </div>
+          </section>
+
+          <section class="panel exam-guidance-panel">
+            <p class="eyebrow">How To Use The Result</p>
+            <div class="exam-guidance-grid">
+              <article class="study-card">
+                <h4>If you score low on a topic</h4>
+                <p>Go back to Reader for that chapter, then redo only the missed exam questions. Use the section graphics, equation panels, and companion notebook to rebuild understanding before memorizing answers.</p>
+              </article>
+              <article class="study-card">
+                <h4>If you miss conceptual questions</h4>
+                <p>Explain the mechanism out loud in plain language first. Then connect it back to the formula, architecture, or pipeline that the question depends on.</p>
+              </article>
+              <article class="study-card">
+                <h4>If you miss comparative questions</h4>
+                <p>Build a contrast table: what each method assumes, what problem it solves, what can go wrong, and what metric or behavior you would inspect in practice.</p>
+              </article>
+            </div>
+          </section>
+        </article>
+      </section>
+    `;
+
+    els.viewRoot.querySelectorAll("[data-exam-id]").forEach((button) => {
+      button.addEventListener("click", () => {
+        state.examId = button.dataset.examId;
+        state.examQuestionIndex = 0;
+        render();
+      });
+    });
+
+    els.viewRoot.querySelectorAll("[data-exam-question-index]").forEach((button) => {
+      button.addEventListener("click", () => {
+        state.examQuestionIndex = Number(button.dataset.examQuestionIndex);
+        render();
+      });
+    });
+
+    document.getElementById("jump-unanswered-button")?.addEventListener("click", () => {
+      if (unansweredIndex >= 0) {
+        state.examQuestionIndex = unansweredIndex;
+        render();
+      }
+    });
+
+    document.getElementById("exam-prev-button")?.addEventListener("click", () => {
+      state.examQuestionIndex = Math.max(0, state.examQuestionIndex - 1);
+      render();
+    });
+
+    document.getElementById("exam-next-button")?.addEventListener("click", () => {
+      state.examQuestionIndex = Math.min(exam.questions.length - 1, state.examQuestionIndex + 1);
+      render();
+    });
+
+    els.viewRoot.querySelectorAll("[data-exam-option]").forEach((button) => {
+      button.addEventListener("click", () => {
+        if (record.submittedAt) {
+          return;
+        }
+        setExamAnswer(exam.id, currentQuestion.id, button.dataset.examOption);
+        render();
+      });
+    });
+
+    document.getElementById("submit-exam-button")?.addEventListener("click", () => {
+      if (!stats.answered) {
+        state.ui.copyStatus = "Choose at least one answer before submitting.";
+        render();
+        return;
+      }
+      if (stats.unanswered && !window.confirm(`This attempt still has ${stats.unanswered} unanswered question(s). Submit anyway?`)) {
+        return;
+      }
+      submitExam(exam.id);
+      render();
+    });
+
+    document.getElementById("reset-exam-button")?.addEventListener("click", () => {
+      const message = record.submittedAt
+        ? "Clear the saved answers for this exam? Your past score history will stay."
+        : "Clear the current in-progress answers for this exam?";
+      if (!window.confirm(message)) {
+        return;
+      }
+      resetExamAttempt(exam.id);
+      render();
+    });
+
+    document.getElementById("retake-exam-button")?.addEventListener("click", () => {
+      if (!window.confirm("Start a fresh attempt for this exam? Your previous score will stay in the local history.")) {
+        return;
+      }
+      resetExamAttempt(exam.id);
+      render();
     });
   }
 
@@ -1337,6 +2177,114 @@
     };
   }
 
+  function getExamRecord(examId) {
+    if (!examId) {
+      return { answers: {}, submittedAt: null, attempts: [] };
+    }
+    if (!progress.examAttempts[examId]) {
+      progress.examAttempts[examId] = {
+        answers: {},
+        submittedAt: null,
+        attempts: [],
+      };
+    }
+    return progress.examAttempts[examId];
+  }
+
+  function setExamAnswer(examId, questionId, optionId) {
+    const record = getExamRecord(examId);
+    if (record.submittedAt) {
+      return;
+    }
+    record.answers[questionId] = optionId;
+    saveProgress();
+  }
+
+  function gradeExam(exam, answers) {
+    const byTopic = {};
+    let correct = 0;
+    let answered = 0;
+    exam.questions.forEach((question) => {
+      const userAnswer = answers[question.id];
+      const topicRecord = byTopic[question.topic] || { topic: question.topic, total: 0, correct: 0, answered: 0 };
+      topicRecord.total += 1;
+      if (userAnswer) {
+        answered += 1;
+        topicRecord.answered += 1;
+        if (userAnswer === question.answer) {
+          correct += 1;
+          topicRecord.correct += 1;
+        }
+      }
+      byTopic[question.topic] = topicRecord;
+    });
+    const total = exam.questions.length;
+    return {
+      correct,
+      total,
+      answered,
+      unanswered: total - answered,
+      answeredPercent: total ? Math.round((answered / total) * 100) : 0,
+      percent: total ? Math.round((correct / total) * 100) : 0,
+      byTopic,
+      topicCount: Object.keys(byTopic).length,
+    };
+  }
+
+  function getExamStats(exam, record = getExamRecord(exam?.id)) {
+    if (!exam) {
+      return { correct: 0, total: 0, answered: 0, unanswered: 0, percent: 0, answeredPercent: 0, byTopic: {}, topicCount: 0 };
+    }
+    if (record.submittedAt && record.lastResult) {
+      return {
+        ...record.lastResult,
+        answered: Object.keys(record.answers || {}).length,
+        unanswered: exam.questions.length - Object.keys(record.answers || {}).length,
+        answeredPercent: exam.questions.length ? Math.round((Object.keys(record.answers || {}).length / exam.questions.length) * 100) : 0,
+        topicCount: Object.keys(record.lastResult.byTopic || {}).length,
+      };
+    }
+    return gradeExam(exam, record.answers || {});
+  }
+
+  function getExamTopicBreakdown(exam, record) {
+    const stats = getExamStats(exam, record);
+    return data.chapters
+      .map((chapter) => stats.byTopic[chapter.slug])
+      .filter(Boolean);
+  }
+
+  function submitExam(examId) {
+    const exam = examMap[examId];
+    if (!exam) {
+      return;
+    }
+    const record = getExamRecord(examId);
+    const result = gradeExam(exam, record.answers || {});
+    const submittedAt = new Date().toISOString();
+    record.submittedAt = submittedAt;
+    record.lastResult = result;
+    record.attempts = [...(record.attempts || []), {
+      submittedAt,
+      correct: result.correct,
+      total: result.total,
+      percent: result.percent,
+      byTopic: result.byTopic,
+    }];
+    saveProgress();
+  }
+
+  function resetExamAttempt(examId) {
+    const record = getExamRecord(examId);
+    progress.examAttempts[examId] = {
+      answers: {},
+      submittedAt: null,
+      attempts: record.attempts || [],
+      lastResult: null,
+    };
+    saveProgress();
+  }
+
   function getOverallProgress() {
     const totalSections = data.chapters.reduce((sum, chapter) => sum + chapter.sections.length, 0);
     const studiedSections = Object.keys(progress.studiedSections).length;
@@ -1358,6 +2306,17 @@
 
   function navigateFromTarget(target) {
     if (!target) {
+      return;
+    }
+    if (target.view === "exams" && target.exam && examMap[target.exam]) {
+      if (target.topic && chapterMap[target.topic]) {
+        state.topic = target.topic;
+      }
+      state.examId = target.exam;
+      const exam = examMap[target.exam];
+      const targetIndex = exam.questions.findIndex((question) => question.id === target.question);
+      state.examQuestionIndex = targetIndex >= 0 ? targetIndex : 0;
+      setView("exams");
       return;
     }
     if (target.topic && chapterMap[target.topic]) {
