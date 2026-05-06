@@ -15,6 +15,11 @@
     glossary: "Glossary",
     search: "Search",
   };
+  const DEFAULT_UI_PREFS = {
+    readerScale: "comfortable",
+    focusMode: false,
+  };
+  const MOBILE_SIDEBAR_BREAKPOINT = 1180;
 
   const PRACTICE_ALIASES = {
     "all": data.chapters.map((chapter) => chapter.slug),
@@ -34,6 +39,9 @@
     progressPill: document.getElementById("progress-pill"),
     randomQuestionButton: document.getElementById("random-question-button"),
     resumeButton: document.getElementById("resume-button"),
+    sidebar: document.getElementById("site-sidebar"),
+    sidebarToggleButton: document.getElementById("sidebar-toggle-button"),
+    sidebarOverlay: document.getElementById("sidebar-overlay"),
     modeLinks: Array.from(document.querySelectorAll(".mode-link")),
   };
 
@@ -70,6 +78,13 @@
       rankingRelevant: [1, 0, 1, 0, 0, 1, 0, 0],
       rankingK: 5,
     },
+    ui: {
+      sidebarOpen: false,
+      readerScale: progress.uiPrefs?.readerScale || DEFAULT_UI_PREFS.readerScale,
+      focusMode: progress.uiPrefs?.focusMode || DEFAULT_UI_PREFS.focusMode,
+      sectionQuery: "",
+      copyStatus: "",
+    },
   };
 
   initialize();
@@ -90,11 +105,18 @@
   }
 
   function initialize() {
-    const lastLocation = progress.lastLocation;
-    if (lastLocation && chapterMap[lastLocation.topic]) {
-      state.topic = lastLocation.topic;
-      state.section = lastLocation.section || chapterMap[lastLocation.topic].sections[0]?.id || null;
-      state.view = lastLocation.view || "dashboard";
+    const hashState = readHashState();
+    if (hashState.topic && chapterMap[hashState.topic]) {
+      state.topic = hashState.topic;
+      state.section = hashState.section || chapterMap[hashState.topic].sections[0]?.id || null;
+      state.view = hashState.view || "reader";
+    } else {
+      const lastLocation = progress.lastLocation;
+      if (lastLocation && chapterMap[lastLocation.topic]) {
+        state.topic = lastLocation.topic;
+        state.section = lastLocation.section || chapterMap[lastLocation.topic].sections[0]?.id || null;
+        state.view = lastLocation.view || "dashboard";
+      }
     }
     resetPracticeOrder();
     resetFlashcards();
@@ -106,16 +128,17 @@
     try {
       const raw = window.localStorage.getItem(STORAGE_KEY);
       if (!raw) {
-        return { studiedSections: {}, quizConfidence: {}, lastLocation: null };
+        return { studiedSections: {}, quizConfidence: {}, lastLocation: null, uiPrefs: { ...DEFAULT_UI_PREFS } };
       }
       const parsed = JSON.parse(raw);
       return {
         studiedSections: parsed.studiedSections || {},
         quizConfidence: parsed.quizConfidence || {},
         lastLocation: parsed.lastLocation || null,
+        uiPrefs: { ...DEFAULT_UI_PREFS, ...(parsed.uiPrefs || {}) },
       };
     } catch (_error) {
-      return { studiedSections: {}, quizConfidence: {}, lastLocation: null };
+      return { studiedSections: {}, quizConfidence: {}, lastLocation: null, uiPrefs: { ...DEFAULT_UI_PREFS } };
     }
   }
 
@@ -128,8 +151,95 @@
         topic: state.topic,
         section: state.section,
       },
+      uiPrefs: {
+        readerScale: state.ui.readerScale,
+        focusMode: state.ui.focusMode,
+      },
     };
     window.localStorage.setItem(STORAGE_KEY, JSON.stringify(snapshot));
+  }
+
+  function readHashState() {
+    const raw = window.location.hash.replace(/^#/, "");
+    if (!raw) {
+      return {};
+    }
+    const params = new URLSearchParams(raw);
+    return {
+      view: params.get("view") || null,
+      topic: params.get("topic") || null,
+      section: params.get("section") || null,
+    };
+  }
+
+  function syncLocationHash() {
+    const params = new URLSearchParams();
+    params.set("view", state.view);
+    params.set("topic", state.topic);
+    if (state.section) {
+      params.set("section", state.section);
+    }
+    const nextHash = `#${params.toString()}`;
+    if (window.location.hash !== nextHash) {
+      window.history.replaceState(null, "", `${window.location.pathname}${window.location.search}${nextHash}`);
+    }
+  }
+
+  function applyShellState() {
+    const sidebarOpen = Boolean(state.ui.sidebarOpen && window.innerWidth <= MOBILE_SIDEBAR_BREAKPOINT);
+    document.body.classList.toggle("sidebar-open", sidebarOpen);
+    document.body.classList.toggle("reader-focus-mode", Boolean(state.ui.focusMode && state.view === "reader"));
+    document.body.classList.toggle("reader-scale-compact", state.ui.readerScale === "compact");
+    document.body.classList.toggle("reader-scale-large", state.ui.readerScale === "large");
+    els.sidebarOverlay?.classList.toggle("hidden", !sidebarOpen);
+    if (els.sidebarToggleButton) {
+      els.sidebarToggleButton.setAttribute("aria-expanded", sidebarOpen ? "true" : "false");
+      els.sidebarToggleButton.textContent = sidebarOpen ? "Close Menu" : "Study Menu";
+    }
+  }
+
+  function handleGlobalKeydown(event) {
+    const target = event.target;
+    const tagName = target?.tagName ? target.tagName.toLowerCase() : "";
+    const isTypingTarget = target?.isContentEditable || ["input", "textarea", "select"].includes(tagName);
+
+    if (event.key === "Escape" && state.ui.sidebarOpen) {
+      state.ui.sidebarOpen = false;
+      applyShellState();
+      saveProgress();
+      return;
+    }
+
+    if (state.view !== "reader" || isTypingTarget) {
+      return;
+    }
+
+    const chapter = chapterMap[state.topic];
+    const currentSection = sectionMap.get(state.section)?.section || chapter.sections[0];
+    const sectionIndex = chapter.sections.findIndex((section) => section.id === currentSection?.id);
+
+    if (event.key === "ArrowRight" && sectionIndex < chapter.sections.length - 1) {
+      event.preventDefault();
+      state.section = chapter.sections[sectionIndex + 1].id;
+      render();
+      return;
+    }
+
+    if (event.key === "ArrowLeft" && sectionIndex > 0) {
+      event.preventDefault();
+      state.section = chapter.sections[sectionIndex - 1].id;
+      render();
+      return;
+    }
+
+    if (event.key === "/") {
+      const sectionFilter = document.getElementById("section-filter-input");
+      if (sectionFilter) {
+        event.preventDefault();
+        sectionFilter.focus();
+        sectionFilter.select?.();
+      }
+    }
   }
 
   function bindStaticEvents() {
@@ -155,6 +265,30 @@
         setView("reader");
       }
     });
+
+    els.sidebarToggleButton?.addEventListener("click", () => {
+      state.ui.sidebarOpen = !state.ui.sidebarOpen;
+      applyShellState();
+      saveProgress();
+    });
+
+    els.sidebarOverlay?.addEventListener("click", () => {
+      if (!state.ui.sidebarOpen) {
+        return;
+      }
+      state.ui.sidebarOpen = false;
+      applyShellState();
+      saveProgress();
+    });
+
+    window.addEventListener("resize", () => {
+      if (window.innerWidth > MOBILE_SIDEBAR_BREAKPOINT && state.ui.sidebarOpen) {
+        state.ui.sidebarOpen = false;
+        applyShellState();
+      }
+    });
+
+    window.addEventListener("keydown", handleGlobalKeydown);
   }
 
   function setView(view) {
@@ -162,11 +296,16 @@
     if (view === "reader" && !state.section) {
       state.section = chapterMap[state.topic].sections[0]?.id || null;
     }
+    state.ui.copyStatus = "";
+    if (window.innerWidth <= MOBILE_SIDEBAR_BREAKPOINT) {
+      state.ui.sidebarOpen = false;
+    }
     saveProgress();
     render();
   }
 
   function render() {
+    applyShellState();
     els.currentViewTitle.textContent = VIEW_TITLES[state.view] || "Study";
     renderHeroStrip();
     renderTopicNav();
@@ -175,6 +314,7 @@
     updateProgressPill();
     queueMathTypeset();
     saveProgress();
+    syncLocationHash();
   }
 
   function renderModeNav() {
@@ -232,6 +372,7 @@
         const chapter = chapterMap[button.dataset.topic];
         state.topic = chapter.slug;
         state.section = chapter.sections[0]?.id || null;
+        state.ui.sectionQuery = "";
         setView("reader");
       });
     });
@@ -395,6 +536,7 @@
         const chapter = chapterMap[button.dataset.openReader];
         state.topic = chapter.slug;
         state.section = chapter.sections[0]?.id || null;
+        state.ui.sectionQuery = "";
         setView("reader");
       });
     });
@@ -416,6 +558,13 @@
     const prevSection = chapter.sections[sectionIndex - 1] || null;
     const nextSection = chapter.sections[sectionIndex + 1] || null;
     const studied = Boolean(progress.studiedSections[currentSection.id]);
+    const studiedCount = chapter.sections.filter((section) => progress.studiedSections[section.id]).length;
+    const chapterProgressPercent = chapter.sections.length ? Math.round((studiedCount / chapter.sections.length) * 100) : 0;
+    const sectionFilterQuery = state.ui.sectionQuery.trim().toLowerCase();
+    const visibleSections = chapter.sections.filter((section) =>
+      !sectionFilterQuery || section.title.toLowerCase().includes(sectionFilterQuery),
+    );
+    const nextUnstudied = chapter.sections.find((section) => !progress.studiedSections[section.id]) || null;
     const chapterOrientationHtml = chapter.introHtml.replace(/<figure class="md-figure[\s\S]*?<\/figure>/g, "");
     const sectionHero = currentSection.figureSrc
       ? `
@@ -437,13 +586,27 @@
             <span class="meta-pill">${chapter.wordCount} words</span>
             <span class="meta-pill">${chapter.sectionCount} sections</span>
           </div>
+          <div class="chapter-progress-panel">
+            <div class="sidebar-title-row">
+              <strong>Chapter progress</strong>
+              <span>${studiedCount}/${chapter.sections.length}</span>
+            </div>
+            <div class="topic-meter"><span style="width:${chapterProgressPercent}%"></span></div>
+          </div>
+          <div class="reader-sidebar-tools">
+            <label class="sidebar-field">
+              <span>Filter sections</span>
+              <input id="section-filter-input" class="input" type="text" placeholder="Type / to jump here" value="${escapeAttribute(state.ui.sectionQuery)}">
+            </label>
+            ${nextUnstudied ? `<button class="tiny-button" id="next-unstudied-button">Jump To Next Unstudied</button>` : ""}
+          </div>
           <div class="section-list">
-            ${chapter.sections.map((section) => `
+            ${visibleSections.length ? visibleSections.map((section) => `
               <button class="section-jump ${section.id === currentSection.id ? "is-active" : ""}" data-section-id="${section.id}">
                 <strong>${escapeHtml(section.title)}</strong>
                 <div class="small subtle" style="margin-top:0.25rem;">${section.readMinutes} min ${progress.studiedSections[section.id] ? "- studied" : ""}</div>
               </button>
-            `).join("")}
+            `).join("") : `<div class="empty-state">No sections matched that filter.</div>`}
           </div>
         </aside>
 
@@ -453,6 +616,7 @@
               <p class="eyebrow">Current Section</p>
               <h3>${escapeHtml(currentSection.title)}</h3>
               <div class="reader-meta">
+                <span class="meta-pill">Section ${sectionIndex + 1} of ${chapter.sections.length}</span>
                 <span class="meta-pill">${currentSection.readMinutes} min</span>
                 <span class="meta-pill">${currentSection.wordCount} words</span>
                 <span class="meta-pill">${studied ? "Studied" : "Not marked yet"}</span>
@@ -464,6 +628,24 @@
               ${nextSection ? `<button class="secondary-button" id="next-section-button">Next</button>` : ""}
             </div>
           </div>
+
+          <section class="reader-utility-bar">
+            <div class="reader-control-group">
+              <span class="reader-control-label">Reading size</span>
+              <div class="segmented-control" role="group" aria-label="Reading size">
+                <button class="segment-button ${state.ui.readerScale === "compact" ? "is-active" : ""}" data-reader-scale="compact">Compact</button>
+                <button class="segment-button ${state.ui.readerScale === "comfortable" ? "is-active" : ""}" data-reader-scale="comfortable">Comfortable</button>
+                <button class="segment-button ${state.ui.readerScale === "large" ? "is-active" : ""}" data-reader-scale="large">Large</button>
+              </div>
+            </div>
+            <div class="reader-control-actions">
+              <button class="tiny-button ${state.ui.focusMode ? "is-active" : ""}" id="focus-mode-button">${state.ui.focusMode ? "Exit Focus Mode" : "Focus Mode"}</button>
+              <button class="tiny-button" id="copy-section-link-button">Copy Section Link</button>
+            </div>
+            <p class="reader-shortcut-note">Use <strong>&larr;</strong> and <strong>&rarr;</strong> to move between sections, and press <strong>/</strong> to jump to the section filter.</p>
+          </section>
+
+          ${state.ui.copyStatus ? `<p class="reader-status-note">${escapeHtml(state.ui.copyStatus)}</p>` : ""}
 
           <div class="reader-copy">
             ${sectionHero}
@@ -565,6 +747,19 @@
       });
     });
 
+    document.getElementById("section-filter-input")?.addEventListener("input", (event) => {
+      state.ui.sectionQuery = event.target.value;
+      render();
+    });
+
+    const nextUnstudiedButton = document.getElementById("next-unstudied-button");
+    if (nextUnstudiedButton && nextUnstudied) {
+      nextUnstudiedButton.addEventListener("click", () => {
+        state.section = nextUnstudied.id;
+        render();
+      });
+    }
+
     const toggleButton = document.getElementById("toggle-studied-button");
     if (toggleButton) {
       toggleButton.addEventListener("click", () => {
@@ -588,6 +783,22 @@
         render();
       });
     }
+
+    els.viewRoot.querySelectorAll("[data-reader-scale]").forEach((button) => {
+      button.addEventListener("click", () => {
+        state.ui.readerScale = button.dataset.readerScale;
+        render();
+      });
+    });
+
+    document.getElementById("focus-mode-button")?.addEventListener("click", () => {
+      state.ui.focusMode = !state.ui.focusMode;
+      render();
+    });
+
+    document.getElementById("copy-section-link-button")?.addEventListener("click", async () => {
+      await copyCurrentSectionLink();
+    });
   }
 
   function renderPractice() {
@@ -1152,6 +1363,7 @@
     if (target.topic && chapterMap[target.topic]) {
       state.topic = target.topic;
       state.section = target.section || chapterMap[target.topic].sections[0]?.id || null;
+      state.ui.sectionQuery = "";
     }
     if (target.view === "practice" && target.topic) {
       state.practiceTopic = target.topic;
@@ -1170,6 +1382,45 @@
       state.cramQuery = target.title;
     }
     setView(target.view || "reader");
+  }
+
+  function getCurrentSectionUrl() {
+    const params = new URLSearchParams();
+    params.set("view", "reader");
+    params.set("topic", state.topic);
+    if (state.section) {
+      params.set("section", state.section);
+    }
+    return `${window.location.origin}${window.location.pathname}${window.location.search}#${params.toString()}`;
+  }
+
+  async function copyCurrentSectionLink() {
+    const value = getCurrentSectionUrl();
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(value);
+      } else {
+        const textarea = document.createElement("textarea");
+        textarea.value = value;
+        textarea.setAttribute("readonly", "");
+        textarea.style.position = "absolute";
+        textarea.style.left = "-9999px";
+        document.body.appendChild(textarea);
+        textarea.select();
+        document.execCommand("copy");
+        textarea.remove();
+      }
+      state.ui.copyStatus = "Section link copied to clipboard.";
+    } catch (_error) {
+      state.ui.copyStatus = "Copy failed here, but the URL hash is updated so you can copy it from the address bar.";
+    }
+    render();
+    window.setTimeout(() => {
+      state.ui.copyStatus = "";
+      if (state.view === "reader") {
+        render();
+      }
+    }, 2200);
   }
 
   function bindLabInteractions() {

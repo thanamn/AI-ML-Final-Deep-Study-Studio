@@ -1,30 +1,33 @@
 # AI/ML Final Deep Study Studio
 
-This folder contains a standalone interactive study site for the final-exam scope from unsupervised learning through generative AI.
+This repository contains a standalone interactive study site for the final-exam scope from unsupervised learning through generative AI.
 
-## Main file
+## Open the site
 
 - `index.html`
 
 Open `index.html` directly in a browser, or serve the folder locally if you want a more normal browser workflow.
 
-## What is inside
+## Included files
 
 - `index.html`: app shell
 - `styles.css`: layout and visual design
 - `app.js`: reader, practice, flashcards, search, and concept-lab behavior
 - `content-data.js`: generated content bundle used by the site
-- `build_site_data.py`: rebuilds `content-data.js` from the markdown study documents
-- `figures/`: generated chapter diagrams used by the reader content
+- `figures/`: generated chapter and section visuals used throughout the reader
 
-## Regenerate content
+## Reader upgrades
 
-If the chapter markdown files change, rebuild the content bundle with:
-
-```powershell
-python .\build_study_figures.py
-python .\interactive_study_site\build_site_data.py
-```
+- Proper math rendering with MathJax
+- A long-form reader with section-by-section study flow
+- Section-specific graphics for every subchapter
+- Reading-size controls for compact, comfortable, and large layouts
+- Focus mode for distraction-free reading
+- Section filtering inside each chapter
+- Jump-to-next-unstudied navigation
+- Copyable deep links to the current section
+- Keyboard shortcuts for faster reading
+- Mobile-friendly layout and a collapsible study menu
 
 ## Study modes
 
@@ -36,3 +39,7 @@ python .\interactive_study_site\build_site_data.py
 - `Concept Lab`: small interactive demos and calculators
 - `Glossary`: term lookup
 - `Search`: cross-topic search
+
+## Notes
+
+This repository is the exported standalone site build. The broader document-generation and figure-generation source pipeline lives in the author workspace and is not required to use the site.
